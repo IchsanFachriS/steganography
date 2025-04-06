@@ -9,7 +9,7 @@ import base64
 import io
 import math
 
-class EnhancedSteganographyLSB:
+class SteganographyLSB:
     def __init__(self):
         """Initialize steganography class with default parameters"""
         self.delimiter = "END_OF_MESSAGE"  # Delimiter to mark the end of message
@@ -321,7 +321,7 @@ class EnhancedSteganographyLSB:
 
 # Interactive CLI for the program
 def main():
-    steg = EnhancedSteganographyLSB()
+    steg = SteganographyLSB()
     
     print("===== LSB STEGANOGRAPHY PROGRAM =====")
     
@@ -429,7 +429,7 @@ def main():
                     print(f"Error: {e}")
                     
             elif choice == '6':  # Exit
-                print("Thank you for using the Enhanced LSB Steganography Program!")
+                print("Thank you for using the LSB Steganography Program!")
                 break
                 
             else:
