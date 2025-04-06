@@ -41,7 +41,7 @@ A powerful Python-based steganography tool for hiding messages and files within 
 Run the script to use the interactive CLI:
 
 ```
-python steganography.py
+python steganography-LSB.py
 ```
 
 The program offers six options:
