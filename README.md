@@ -26,7 +26,7 @@ A powerful Python-based steganography tool for hiding messages and files within 
 1. Clone this repository:
    ```
    git clone https://github.com/ichsanfachris/steganography.git
-   cd steganography-LSB
+   cd steganography-LSB.py
    ```
 
 2. Install dependencies:
