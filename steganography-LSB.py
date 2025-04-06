@@ -1,13 +1,13 @@
 import numpy as np
 from PIL import Image
 import os
-import random
 import hashlib
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 import base64
 import io
 import math
+import struct
 
 class SteganographyLSB:
     def __init__(self):
@@ -38,13 +38,6 @@ class SteganographyLSB:
         delimiter_bytes = len(self.delimiter) + 4  # +4 for length storage
         
         return total_bytes - delimiter_bytes
-    
-    def generate_embedding_positions(self, seed, total_positions, message_length):
-        """Generate pseudo-random positions for embedding using a seed"""
-        random.seed(seed)
-        positions = list(range(total_positions))
-        random.shuffle(positions)
-        return positions[:message_length * 8]
     
     def text_to_binary(self, text):
         """Convert text to binary string"""
@@ -85,6 +78,11 @@ class SteganographyLSB:
         # Generate key from password
         key = hashlib.sha256(password.encode()).digest()
         
+        # Ensure we have enough data for IV
+        if len(encrypted) < 16:
+            print(f"Encrypted data too short: {len(encrypted)} bytes")
+            return None
+            
         # Extract IV from the beginning
         iv = encrypted[:16]
         ct_bytes = encrypted[16:]
@@ -94,11 +92,12 @@ class SteganographyLSB:
         try:
             pt = unpad(cipher.decrypt(ct_bytes), AES.block_size)
             return pt
-        except ValueError:
+        except Exception as e:
+            print(f"Decryption error: {e}")
             return None  # Decryption failed
     
-    def embed_message(self, cover_path, message, output_path, password=None, use_encryption=False, use_randomization=True):
-        """Embed message into cover image with optional encryption and randomization"""
+    def embed_message(self, cover_path, message, output_path, password=None, use_encryption=False):
+        """Embed message into cover image with optional encryption"""
         # Read the cover image
         try:
             image = Image.open(cover_path)
@@ -120,42 +119,38 @@ class SteganographyLSB:
         # Calculate total pixels and capacity
         max_capacity = self.calculate_capacity(image)
         
-        # Process message: add delimiter and optionally encrypt
+        # Process message
         if isinstance(message, str):
-            message = message.encode() + self.delimiter.encode()
-        else:  # Assume it's bytes already
-            message = message + self.delimiter.encode()
+            message = message.encode()
         
+        # Add delimiter
+        final_message = message + self.delimiter.encode()
+        
+        # Encrypt if needed
         if use_encryption and password:
-            message = self.encrypt_message(message, password)
+            final_message = self.encrypt_message(final_message, password)
+        
+        # Add length header (4 bytes for message length)
+        length_header = struct.pack(">I", len(final_message))
+        final_message_with_header = length_header + final_message
         
         # Check if message fits in the image
-        if len(message) > max_capacity:
-            raise ValueError(f"Message is too large for this image. Maximum capacity: {max_capacity} bytes, Message size: {len(message)} bytes")
+        if len(final_message_with_header) > max_capacity:
+            raise ValueError(f"Message is too large for this image. Maximum capacity: {max_capacity} bytes, Message size: {len(final_message_with_header)} bytes")
         
         # Convert message to binary
-        binary_message = self.text_to_binary(message)
+        binary_message = self.text_to_binary(final_message_with_header)
         message_bits = len(binary_message)
         
         # Prepare for embedding
         flattened_array = pixel_array.reshape(-1)  # Flatten the array
-        total_elements = len(flattened_array)
         
-        # Generate embedding positions
-        if use_randomization and password:
-            # Use password as seed for randomization
-            seed = int(hashlib.md5(password.encode()).hexdigest(), 16) % 10000000
-            positions = self.generate_embedding_positions(seed, total_elements, message_bits)
-        else:
-            positions = list(range(message_bits))
-        
-        # Embed message bits
+        # Embed message bits sequentially
         for idx, bit in enumerate(binary_message):
             if idx < message_bits:
-                pos = positions[idx] if use_randomization and password else idx
                 # Change LSB
-                byte_value = flattened_array[pos]
-                flattened_array[pos] = (byte_value & ~1) | int(bit)
+                byte_value = flattened_array[idx]
+                flattened_array[idx] = (byte_value & ~1) | int(bit)
         
         # Reshape array back to image dimensions
         stego_array = flattened_array.reshape(pixel_array.shape)
@@ -170,12 +165,12 @@ class SteganographyLSB:
         return {
             "status": "success",
             "output_path": output_path,
-            "message_size": len(message),
-            "capacity_used": f"{len(message)/max_capacity*100:.2f}%",
+            "message_size": len(final_message_with_header),
+            "capacity_used": f"{len(final_message_with_header)/max_capacity*100:.2f}%",
             "psnr": f"{psnr:.2f} dB"
         }
     
-    def embed_file(self, cover_path, file_path, output_path, password=None, use_encryption=False, use_randomization=True):
+    def embed_file(self, cover_path, file_path, output_path, password=None, use_encryption=False):
         """Embed a file into cover image"""
         # Read file as binary
         with open(file_path, 'rb') as f:
@@ -189,9 +184,9 @@ class SteganographyLSB:
         message = file_header + file_data
         
         # Use the embed_message function
-        return self.embed_message(cover_path, message, output_path, password, use_encryption, use_randomization)
+        return self.embed_message(cover_path, message, output_path, password, use_encryption)
     
-    def extract_message(self, stego_path, password=None, is_encrypted=False, is_randomized=True):
+    def extract_message(self, stego_path, password=None, is_encrypted=False):
         """Extract message from stego image"""
         # Read the stego image
         try:
@@ -210,62 +205,68 @@ class SteganographyLSB:
         flattened_array = pixel_array.reshape(-1)
         total_elements = len(flattened_array)
         
-        # Generate extraction positions
-        if is_randomized and password:
-            # Use same seed as in embedding
-            seed = int(hashlib.md5(password.encode()).hexdigest(), 16) % 10000000
-            # We don't know the message length yet, so use a large number
-            positions = self.generate_embedding_positions(seed, total_elements, total_elements // 8)
+        # First extract the length header (first 32 bits / 4 bytes)
+        binary_length_header = ""
+        for i in range(32):
+            if i < total_elements:
+                binary_length_header += str(flattened_array[i] & 1)
         
-        # Extract LSBs
-        binary_message = ""
-        max_bits = min(total_elements, 10000000)  # Limit to prevent excessive processing
+        # Convert binary length header to integer
+        length_bytes = self.binary_to_text(binary_length_header)
+        message_length = struct.unpack(">I", length_bytes)[0]
         
-        for i in range(max_bits):
-            pos = positions[i] if is_randomized and password else i
-            if pos < total_elements:
-                binary_message += str(flattened_array[pos] & 1)
-            
-            # Every 8 bits, check for delimiter
-            if i % 8 == 7 and i >= (len(self.delimiter) * 8):
-                # Convert recent bits to text
-                current_bytes = self.binary_to_text(binary_message[-len(self.delimiter)*8:])
-                try:
-                    current_text = current_bytes.decode('utf-8', errors='ignore')
-                    # Check if we've reached the delimiter
-                    if self.delimiter in current_text:
-                        break
-                except:
-                    pass
+        print(f"Extracted message length: {message_length} bytes")
         
-        # Convert binary to bytes
+        # Calculate total bits to extract (length header + message)
+        total_bits_to_extract = 32 + (message_length * 8)
+        
+        # Extract all bits needed
+        binary_message = binary_length_header  # Start with length header we already extracted
+        for i in range(32, total_bits_to_extract):
+            if i < total_elements:
+                binary_message += str(flattened_array[i] & 1)
+            else:
+                print(f"Warning: Reached end of image data at bit {i}, needed {total_bits_to_extract}")
+                break
+        
+        # Convert binary string to bytes
         extracted_bytes = self.binary_to_text(binary_message)
+        
+        # Skip the 4-byte length header to get actual message
+        message_data = extracted_bytes[4:]
+        
+        # Verify we got the right number of bytes
+        if len(message_data) != message_length:
+            print(f"Warning: Extracted {len(message_data)} bytes, expected {message_length}")
         
         # Handle decryption if needed
         if is_encrypted and password:
-            extracted_bytes = self.decrypt_message(extracted_bytes, password)
-            if extracted_bytes is None:
-                raise ValueError("Decryption failed. Incorrect password?")
+            decrypted_data = self.decrypt_message(message_data, password)
+            if decrypted_data is None:
+                raise ValueError("Decryption failed. Incorrect password or corrupted data.")
+            message_data = decrypted_data
         
-        # Find delimiter
+        # Find delimiter in the extracted data
         try:
-            delim_index = extracted_bytes.find(self.delimiter.encode())
+            delim_index = message_data.find(self.delimiter.encode())
             if delim_index != -1:
-                extracted_bytes = extracted_bytes[:delim_index]
+                message_data = message_data[:delim_index]
             else:
                 # If delimiter not found, this may not be a valid steganography file
+                print(f"Warning: Delimiter not found in extracted data ({len(message_data)} bytes)")
                 return {"status": "warning", "message": "No valid message found or incorrect parameters."}
-        except:
+        except Exception as e:
+            print(f"Error finding delimiter: {e}")
             return {"status": "error", "message": "Error processing extracted data."}
         
         # Try to interpret as text
         try:
-            extracted_text = extracted_bytes.decode('utf-8')
+            extracted_text = message_data.decode('utf-8')
             return {
                 "status": "success", 
                 "message_type": "text",
                 "message": extracted_text,
-                "binary": extracted_bytes
+                "binary": message_data
             }
         except UnicodeDecodeError:
             # Not valid text, might be binary file
@@ -273,13 +274,13 @@ class SteganographyLSB:
                 "status": "success", 
                 "message_type": "binary",
                 "message": "[Binary data]",
-                "binary": extracted_bytes
+                "binary": message_data
             }
     
-    def extract_file(self, stego_path, output_dir, password=None, is_encrypted=False, is_randomized=True):
+    def extract_file(self, stego_path, output_dir, password=None, is_encrypted=False):
         """Extract a file from stego image"""
         # Extract the raw data
-        result = self.extract_message(stego_path, password, is_encrypted, is_randomized)
+        result = self.extract_message(stego_path, password, is_encrypted)
         
         if result["status"] != "success":
             return result
@@ -347,11 +348,9 @@ def main():
                 if use_encryption:
                     password = input("Enter encryption password: ")
                 
-                use_randomization = input("Use random bit embedding? (y/n): ").lower() == 'y'
-                
                 result = steg.embed_message(
                     cover_path, message, output_path, 
-                    password, use_encryption, use_randomization
+                    password, use_encryption
                 )
                 
                 print("\nEmbedding Results:")
@@ -368,11 +367,9 @@ def main():
                 if use_encryption:
                     password = input("Enter encryption password: ")
                 
-                use_randomization = input("Use random bit embedding? (y/n): ").lower() == 'y'
-                
                 result = steg.embed_file(
                     cover_path, file_path, output_path,
-                    password, use_encryption, use_randomization
+                    password, use_encryption
                 )
                 
                 print("\nFile Embedding Results:")
@@ -387,10 +384,8 @@ def main():
                 if is_encrypted:
                     password = input("Enter decryption password: ")
                 
-                is_randomized = input("Was random bit embedding used? (y/n): ").lower() == 'y'
-                
                 result = steg.extract_message(
-                    stego_path, password, is_encrypted, is_randomized
+                    stego_path, password, is_encrypted
                 )
                 
                 print("\nExtraction Results:")
@@ -409,10 +404,8 @@ def main():
                 if is_encrypted:
                     password = input("Enter decryption password: ")
                 
-                is_randomized = input("Was random bit embedding used? (y/n): ").lower() == 'y'
-                
                 result = steg.extract_file(
-                    stego_path, output_dir, password, is_encrypted, is_randomized
+                    stego_path, output_dir, password, is_encrypted
                 )
                 
                 print("\nFile Extraction Results:")
